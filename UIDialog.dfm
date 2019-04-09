@@ -60,10 +60,10 @@ object MainForm: TMainForm
     Height = 703
     Anchors = [akTop, akRight, akBottom]
     Strings.Strings = (
-      'Layer thickness (mm)=0.0'
+      'Layer thickness (mm)=0.05'
       'Normal exposure time (s)=0'
       'Off time (s)=0'
-      'Normal layers=0'
+      'Total layers=0'
       'Bottom exposure time=0'
       'Bottom exp. decrement=0'
       'Bottom layers=0'
@@ -165,8 +165,27 @@ object MainForm: TMainForm
     TabOrder = 9
     OnClick = btnSelectScriptClick
   end
+  object btnLoadImage: TButton
+    Left = 629
+    Top = 827
+    Width = 75
+    Height = 25
+    Anchors = [akRight, akBottom]
+    Caption = 'Load Image'
+    TabOrder = 10
+    OnClick = btnLoadImageClick
+  end
+  object cbxInverseImage: TCheckBox
+    Left = 726
+    Top = 831
+    Width = 97
+    Height = 17
+    Anchors = [akRight, akBottom]
+    Caption = 'Inverse Image'
+    TabOrder = 11
+  end
   object uiOpenDialog: TOpenDialog
-    Filter = 'Anycubc PHOTON files|*.photon'
+    Filter = 'Anycubc PHOTON files|*.photon|Bitmap files|*.bmp'
     Left = 48
     Top = 384
   end

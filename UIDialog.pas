@@ -5,7 +5,7 @@ interface
 uses
   Winapi.Windows, Winapi.Messages, System.Types, System.SysUtils, System.Variants, System.Classes, Vcl.Graphics,
   Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, Vcl.ExtCtrls, PhotonFile, Vcl.Grids, Vcl.ValEdit, Misc, StrClasses, DateTimeTools,
-  Vcl.ComCtrls;
+  Vcl.ComCtrls, Math;
 
 type
   TMainForm = class(TForm)
@@ -23,6 +23,8 @@ type
     cbxShowPreview0: TCheckBox;
     cbxShowPreview1: TCheckBox;
     btnSelectScript: TButton;
+    btnLoadImage: TButton;
+    cbxInverseImage: TCheckBox;
     procedure btnOpenFileClick(Sender: TObject);
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
@@ -35,6 +37,7 @@ type
     procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
     procedure btnSelectScriptClick(Sender: TObject);
     procedure vleGlobalsStringsChange(Sender: TObject);
+    procedure btnLoadImageClick(Sender: TObject);
   private
     { Private declarations }
        phFile: TPhotonFile;
@@ -46,12 +49,22 @@ type
     orig_proc: TWndMethod;
     open_mode: Boolean;
 
+    procedure SetDefValue(const key: String; val: Integer); overload;
     procedure ShowPreview (index: Integer);
     procedure PatchWindowProc(var Message: TMessage);
     function  GetLayerProcessor: TLayerProcessor;
     procedure WaitThreads(timeOut: DWORD);
+    procedure ProducePhotonFile;
+    function GetIntGlobal(const key: String): Integer;
+    function GetFloatGlobal(const key: String): Single;
+    procedure SetFloatGlobal(const key: String; const Value: Single);
   public
     { Public declarations }
+
+    property  IntGlobals[const key: String]: Integer  read GetIntGlobal;
+    property  FloatGlobals[const key: String]: Single read GetFloatGlobal write SetFloatGlobal;
+
+
     procedure RedrawLayer;
   end;
 
@@ -62,6 +75,56 @@ implementation
 uses Contnrs;
 
 {$R *.dfm}
+
+
+// fit big rect [sw x sh] into small rect [tw x th]
+function ScaleFit(tw, th, sw, sh: Integer): TRect;
+var
+   art: Single;
+   ars: Single;
+
+begin
+ art := tw / th;
+ ars := sw / sh;   // need lock this aspect ratio
+ result.SetLocation (0, 0);
+ if ars > art then // 0.5 > 0.4
+  begin
+   result.Width := Round (th / ars);
+   result.Height := th;
+   if result.Width > tw then
+    begin
+     result.Width := tw;
+     result.Height := Round (tw * ars);
+     result.SetLocation ( 0, (th - result.Height) div 2 );
+    end
+   else
+    result.SetLocation ( (tw - result.Width) div 2, 0 );
+  end
+ else
+  begin           // 0.5 < 1.5
+   result.Width := tw;
+   result.Height := Round (tw / ars);
+   if result.height > th then
+     begin
+      result.Width := Round(th * ars);
+      result.Height := th;
+      result.SetLocation ( (tw - result.Width) div 2, 0 );
+     end
+      else
+     result.SetLocation ( 0, (th - result.Height) div 2 );
+  end;
+end;
+
+
+function TMainForm.GetFloatGlobal(const key: String): Single;
+begin
+ result := atof (vleGlobals.Values[key]);
+end;
+
+function TMainForm.GetIntGlobal(const key: String): Integer;
+begin
+ result := atoi (vleGlobals.Values[key]);
+end;
 
 function TMainForm.GetLayerProcessor: TLayerProcessor;
 var
@@ -90,6 +153,63 @@ begin
    hList[i] := lp_pool[i - 1].RequestEvent;
 
  WaitForMultipleObjects( Length(lp_pool) + 1, @hList, True, timeOut);
+end;
+
+procedure TMainForm.ProducePhotonFile;
+var
+   lcnt: Integer;
+    dir: array of TLayerHeader;
+    ofs: Int64;
+     nl: Integer;
+     ms: TMemoryStream;
+
+begin
+ //.
+ lcnt := Max(1, IntGlobals['Total layers']);
+ SetLength (dir, lcnt);
+
+ ms := TMemoryStream.Create;
+ lproc.DeflateImage(ms);
+
+
+ with phFile do
+  begin
+   pHeader.cnt_layers := lcnt;
+
+   pHeader.layer_th := FloatGlobals['Layer thickness (mm)'];
+   pHeader.exp_time := FloatGlobals['Normal exposure time (s)'];
+   pHeader.exp_bottom := FloatGlobals['Bottom exposure time'];
+   pHeader.cnt_bottom := IntGlobals['Bottom layers'];
+
+   for nl := 0 to lcnt - 1 do
+    begin
+     dir[nl].height := pHeader.layer_th * nl;
+     if nl >= pHeader.cnt_bottom then
+        dir[nl].exp_time := pHeader.exp_time
+     else
+        dir[nl].exp_time := pHeader.exp_bottom;
+
+
+    end;
+
+
+   phFile.SetLayers (dir, False);
+   phFile.RebuildMeta;
+
+   for nl := 0 to lcnt - 1 do
+    begin
+     ofs := phFile.Position;
+     dir[nl].offset := ofs;
+     dir[nl].data_l := ms.Size;
+
+     phFile.Write(ms.Memory^, ms.Size);
+    end;
+
+   phFile.SetLayers (dir, True); // rewrite with offsets
+
+  end;
+
+ ms.Free;
 end;
 
 procedure TMainForm.btnProcessLayersClick(Sender: TObject);
@@ -124,7 +244,7 @@ begin
  for nl := 0 to Length(lp_pool) - 1 do
    with lp_pool[nl] do
     begin
-     CoarseNB := atoi (vleGlobals.Values['Coarse neighbors']);
+     CoarseNB := IntGlobals['Coarse neighbors'];
      ScriptName := FindConfigFile (vleGlobals.Values['LUA Script']);
     end;
  WaitThreads(20000);
@@ -260,12 +380,183 @@ begin
  self.FormResize(self);
 end;
 
+procedure TMainForm.btnLoadImageClick(Sender: TObject);
+const
+   XRES = LCD_DEFAULT_W / 68.04 * 25.4;
+   YRES = LCD_DEFAULT_H / 120.96 * 25.4;
+
+
+var
+   raw: array [0..LCD_DEFAULT_H - 1] of Pointer;
+   bmp: TBitmap;
+   imm: TBitmap;
+   rot: Boolean;
+    sl: PByteArray;
+    sr: TRect;
+    dr: TRect;
+    cx: Single;
+    cy: Single;
+    dw: Integer;
+    dh: Integer;
+    rs: Single;
+     x: Integer;
+     y: Integer;
+     s: String;
+begin
+ uiOpenDialog.Filter := 'Bitmap files|*.bmp';
+ uiOpenDialog.FilterIndex := 1;
+ if not uiOpenDialog.Execute then exit;
+
+ // with layerOut.Picture do
+
+ bmp := TBitmap.Create();
+ bmp.LoadFromFile (uiOpenDialog.FileName);
+
+ imm := TBitmap.Create();
+ imm.PixelFormat := pf8bit;
+
+ s := InputBox('Resolution', 'Image resolution in DPI', '600');
+ rs := atof(s);
+ if (rs <= 0) then rs := 96.0;
+
+ cx := bmp.Width / rs * 25.4;
+ cy := bmp.Height / rs * 25.4;
+
+ lbInfo.Caption := Format('Image size: %.1f x %.1f mm. ', [cx, cy]);
+
+ cx := XRES / rs;
+ cy := YRES / rs;
+ lbInfo.Caption := lbInfo.Caption + Format('Resize ratio X = %.3f, Y = %.3f', [cx, cy]);
+
+ dw := Round (bmp.Width * cx);
+ dh := Round (bmp.Height * cy);
+
+ if (dw > LCD_DEFAULT_H) or (dh > LCD_DEFAULT_W) then
+   begin
+    wprintf('~C0C #WARN:~C07 target resolution to large: %d x %d, will be cropped!', [dw, dh]);
+    dw := Math.Min(dw, LCD_DEFAULT_H);
+    dh := Min(dh, LCD_DEFAULT_W);
+   end;
+
+
+ sr.SetLocation(0, 0);
+ sr.Width := bmp.Width;
+ sr.Height := bmp.Height;
+ dr.SetLocation(0, 0);
+ dr.Width := dw;
+ dr.Height := dh;
+
+
+ if (dw > dh) then
+  begin // rotate need
+   dr.SetLocation ( (LCD_DEFAULT_H - dw) div 2, (LCD_DEFAULT_W - dh) div 2 );
+   imm.SetSize(LCD_DEFAULT_H, LCD_DEFAULT_W); // make wide intermediate bitmap
+   imm.Canvas.CopyRect(dr, bmp.Canvas, sr);   // color conversion if need
+   rot := True;
+  end
+ else
+  begin
+   dr.SetLocation ( (LCD_DEFAULT_W - dw) div 2, (LCD_DEFAULT_H - dh) div 2 );
+   imm.SetSize (LCD_DEFAULT_W, LCD_DEFAULT_H); // make narrow intermediate bitmap
+   imm.Canvas.CopyRect(dr, bmp.Canvas, sr);
+   rot := False;
+  end;
+
+ // TODO: black-white coarse colors
+
+ bmp.FreeImage;
+ bmp.PixelFormat := pf8bit;
+ bmp.SetSize (LCD_DEFAULT_W, LCD_DEFAULT_H);
+
+ if rot then
+  begin
+   Assert (bmp.Width <= imm.Height);
+   // simple rotate
+
+   for y := 0 to imm.Height - 1 do
+       raw[y] := imm.ScanLine[y];
+
+   for y := 0 to bmp.Height - 1 do
+    begin
+     sl := bmp.ScanLine [y];
+     for x := 0 to bmp.Width - 1 do
+         sl[x] := PByteArray(raw[x])^[y];
+    end;
+  end
+ else
+  begin
+   bmp.Assign(imm);
+  end;
+
+ // invert colors if need
+ if cbxInverseImage.Checked then
+   for y := 0 to bmp.Height - 1 do
+    begin
+     sl := bmp.ScanLine [y];
+     for x := 0 to bmp.Width - 1 do
+         sl [x] := 255 - sl [x];
+    end;
+
+
+ lproc.ImportRAW(bmp);
+ SetDefValue('Total layers', 4);
+ SetDefValue('Bottom layers', 1);
+ SetDefValue('Bottom exposure time', 10);
+ SetDefValue('Normal exposure time (s)', 3);
+
+ FloatGlobals['Bed dimension X'] := phFile.pHeader.bed_sx;
+ FloatGlobals['Bed dimension Y'] := phFile.pHeader.bed_sy;
+ FloatGlobals['Bed dimension Z'] := phFile.pHeader.bed_sz;
+
+ phFile.Cleanup;
+ // creating previews
+ imm.FreeImage;
+ imm.PixelFormat := pf15bit;
+ imm.SetSize(648, 425);
+ imm.Canvas.Brush.color := clBlue;
+ imm.Canvas.Brush.Style := bsSolid;
+ imm.Canvas.FillRect(Rect(0, 0, imm.Width, imm.Height));
+
+
+ sr.SetLocation (0, 0);
+ sr.Width := bmp.Width;
+ sr.Height := bmp.Height;
+ // medium preview
+ dr := ScaleFit(imm.Width, imm.Height, bmp.Width, bmp.Height);
+ imm.Canvas.CopyRect(dr, bmp.Canvas, sr);
+ phFile.DeflatePreview (imm, 0);
+
+ // small preview
+ imm.SetSize(198, 127);
+
+ imm.Canvas.FillRect(Rect(0, 0, imm.Width, imm.Height));
+
+ dr := ScaleFit(imm.Width, imm.Height, bmp.Width, bmp.Height);
+ imm.Canvas.CopyRect(dr, bmp.Canvas, sr);
+ phFile.DeflatePreview (imm, 1);
+
+ imm.Free;
+ bmp.Free;
+
+ ProducePhotonFile;
+ lproc.InflateImage(phFile, 0);
+ sbLayerSelect.Max := phFile.LayersCount - 1;
+
+
+ phFile.InflatePreview(preview0, 0);
+ phFile.InflatePreview(preview1, 1);
+ ShowPreview (0);
+ btnSaveFile.Enabled := True;
+end;
+
 procedure TMainForm.btnOpenFileClick(Sender: TObject);
 var
     fs: TFormatSettings;
 
 begin
  fs := TFormatSettings.Create('en-US');
+ uiOpenDialog.Filter := 'PHOTON files|*.photon';
+ uiOpenDialog.FilterIndex := 1;
 
  if uiOpenDialog.Execute() and
       ( phFile.LoadParseFile(uiOpenDialog.FileName) > 0 ) then
@@ -276,7 +567,7 @@ begin
     Values['Layer thickness (mm)']       := FormatFloat('0.##', layer_th, fs);
     Values['Normal exposure time (s)']   := FormatFloat('0.#', exp_time, fs);
     Values['Off time (s)']               := FormatFloat('0.#', off_time, fs);
-    Values['Normal layers']              := IntToStr (cnt_layers);
+    Values['Total layers']               := IntToStr (cnt_layers);
     Values['Bottom exposure time']       := FormatFloat('0.#', exp_bottom, fs);
     Values['Bottom layers']              := IntToStr (cnt_bottom);
     Values['Bed dimension X']            := FormatFloat('0.##', bed_sx, fs);
@@ -488,6 +779,21 @@ begin
  cbxShowPreview1.Checked := False;
  lproc.InflateImage(phFile, sbLayerSelect.Position);
  RedrawLayer;
+end;
+
+procedure TMainForm.SetDefValue(const key: String; val: Integer);
+begin
+ open_mode := True;
+ if vleGlobals.Values[key] = '0' then
+    vleGlobals.Values[key] := IntToStr(val);
+ open_mode := False;
+end;
+
+procedure TMainForm.SetFloatGlobal(const key: String; const Value: Single);
+begin
+ open_mode := True;
+ vleGlobals.Values[key] := FormatFloat('0.0###', Value);
+ open_mode := False;
 end;
 
 procedure TMainForm.ShowPreview(index: Integer);

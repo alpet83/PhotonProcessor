@@ -84,7 +84,8 @@ type
       procedure  PushLayerObject;
       function   GetLayerHeader: PLayerHeader;
       function   GetNewLayerHeader: PLayerHeader;
-    procedure SetNewLayerHeader(const Value: PLayerHeader);
+      procedure  SetNewLayerHeader(const Value: PLayerHeader);
+    function GetRawData: PLayerRAW;
     protected
 
      coarse_nb: Integer;    // default value
@@ -103,6 +104,7 @@ type
       property        ScriptName: String       read FScriptName write SetScriptName;
       property       LayerHeader: PLayerHeader read GetLayerHeader;
       property    NewLayerHeader: PLayerHeader read GetNewLayerHeader write SetNewLayerHeader;
+      property           RawData: PLayerRAW    read GetRawData;
 
       { C & D }
       constructor Create (CreateSuspended: Boolean; const sName: String; bWindowed: Boolean = FALSE );
@@ -113,6 +115,7 @@ type
       function   DeflateImage (dst: TMemoryStream): Integer;               // pack grayscale image to RLE
 
       procedure  ExportRAW (dst: Graphics.TBitmap);
+      function   ImportRAW (src: Graphics.TBitmap): Boolean;               // required 8-bit WB image!
 
 
     end; // TLayerProcess thread class
@@ -150,6 +153,7 @@ type
      // functions
      procedure  Cleanup;
 
+     function   DeflatePreview (src: Graphics.TBitmap; index: Integer): Integer;
      function   InflatePreview (dst: Graphics.TBitmap; index: Integer): Integer;
 
      function   LoadParseFile(const sFileName: String): Integer;
@@ -173,6 +177,8 @@ implementation
 uses LuaTools;
 
 
+const
+  RLE_FLAG = $20;
 
 
 procedure AlignStream4(ms: TCustomMemoryStream);
@@ -256,6 +262,73 @@ begin
  result := @FPrevHeader [i and 1];
 end;
 
+
+function TPhotonFile.DeflatePreview(src: Graphics.TBitmap; index: Integer): Integer;
+var
+   dst: PWordArray;
+   pxl: PWordArray;
+   ofs: Integer;
+   prv: WORD;
+    cl: WORD;
+    cc: WORD;
+     x: Integer;
+     y: Integer;
+
+begin
+ result := 0;
+ if (src.PixelFormat <> pf15bit) and (src.PixelFormat <> pfCustom) then
+  begin
+   PrintError('DeflatePreview: Source image must be 15 bit pixel format');
+   exit;
+  end;
+
+
+ GetMem (dst, src.Width * src.Height * 2); // oversize
+
+ prv := PWord(src.ScanLine[0])^; // first pixel init
+
+ ofs := 0;
+ cc := 0;
+ // std matrix scan loop
+
+ for y := 0 to src.Height - 1 do
+  begin
+   pxl := src.ScanLine [y];
+   for x := 0 to src.Width - 1 do
+    begin
+     cl := pxl [x] and $7FFF;
+     if (prv = cl) and (cc < $FFF) then
+       Inc (cc)
+     else
+      begin
+       Inc (ofs, 1 + Integer(cc >= 1));
+       cc := 0;
+       prv := cl;
+      end;
+
+
+     cl := (cl and $1F) or ( (cl and $FFE0) shl 1 ); // reserve one bit for RLE-flag
+     if cc > 1 then
+        cl := cl or RLE_FLAG;
+
+     dst[ofs] := cl;
+     dst[ofs + 1] := cc;
+    end;
+  end;
+
+ if cc > 1 then Inc (ofs); // finalization
+
+ result := ofs * 2;
+ ReallocMem(dst, result);
+ FPrevData[index] := dst;
+ with FPrevHeader[index] do
+  begin
+   res_x := src.Width;
+   res_y := src.Height;
+   data_l := result;
+  end;
+end;
+
 function TPhotonFile.InflatePreview(dst: Graphics.TBitmap; index: Integer): Integer;
 var
    pph: PPreviewHeader;
@@ -310,9 +383,9 @@ begin
    while i < (data_l div 2) do
     begin
      cl := src[i];
-     rle := cl and $20;
-     cl := cl and (not $20);
-     cl := (cl and $1f) or ( (cl and $FF40) shr 1); // repack RRRRR GGGGG X BBBBB to RRRRR GGGGG BBBB
+     rle := cl and RLE_FLAG;
+     cl := cl and (not RLE_FLAG);
+     cl := (cl and $1f) or ( (cl and $FF40) shr 1); // repack RRRRR GGGGG X BBBBB to 0 RRRRR GGGGG BBBB
      Inc (i);
      cc := 1;
 
@@ -441,11 +514,12 @@ begin
  else
     pHeader.preview1_ofs := Position;
 
- FPrevHeader[0].offset := Position + PREVIEW_HDR_SZ;
- Write (FPrevHeader[0], PREVIEW_HDR_SZ);
- Write (FPrevData[0]^,  FPrevHeader[0].data_l);
- AlignStream4 (self);
+ FPrevHeader[index].offset := Position + PREVIEW_HDR_SZ;
+ Write (FPrevHeader[index], PREVIEW_HDR_SZ);
+ if Assigned(FPrevData[index]) and (FPrevHeader[index].data_l > 0) then
+    Write (FPrevData[index]^,  FPrevHeader[index].data_l);
 
+ AlignStream4 (self);
 end;
 
 procedure TPhotonFile.SetLayers(src: array of TLayerHeader; upd_direct: Boolean);
@@ -616,6 +690,7 @@ var
 begin
  dst.PixelFormat := pf8bit;
  dst.SetSize (LCD_DEFAULT_W, LCD_DEFAULT_H);
+
  try
   for y := 0 to LCD_DEFAULT_H - 1 do
       Move (raw_data[y], dst.ScanLine[y]^, SizeOf(TLayerLine));
@@ -626,6 +701,41 @@ begin
 
  end;
 end;
+
+function  TLayerProcessor.ImportRAW;
+var
+   y: Integer;
+begin
+ result := False;
+
+ if (src.Width <> LCD_DEFAULT_W) or (src.Height <> LCD_DEFAULT_H) then
+  begin
+   PrintError('ImportRAW image size invalid: ' + Format('%d x %d', [src.Width, src.Height]));
+   exit;
+  end;
+
+ if src.PixelFormat <> pf8bit then
+  begin
+   PrintError('ImportRAW image pixel format invalid!');
+   exit;
+  end;
+
+ try
+  for y := 0 to LCD_DEFAULT_H - 1 do
+      Move (src.ScanLine[y]^, raw_data[y], SizeOf(TLayerLine));
+
+  FInflated := True;
+  result := True;
+ except
+  on E: Exception do
+    OnExceptLog('TLayerProcessor.ImportRAW', E);
+
+ end;
+
+
+end;
+
+
 
 function TLayerProcessor.GetLayerHeader: PLayerHeader;
 begin
@@ -639,6 +749,11 @@ begin
  result := FNewHeader;
  if result = nil then
     result := @FTempHeader;
+end;
+
+function TLayerProcessor.GetRawData: PLayerRAW;
+begin
+ result := @raw_data;
 end;
 
 function TLayerProcessor.InflateImage (pf: TPhotonFile; nLayer: Integer): Integer;
@@ -657,6 +772,7 @@ begin
  psrc := pf.Memory;
  if nil = psrc then exit;
  self.n_layer := nLayer;
+ Assert (Assigned(pf.Layers [nLayer]), 'Unassigned layer header ' + IntToStr(nLayer));
 
  plh := pf.Layers [nLayer];
  NewLayerHeader^ := plh^;
