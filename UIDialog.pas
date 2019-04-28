@@ -25,6 +25,8 @@ type
     btnSelectScript: TButton;
     btnLoadImage: TButton;
     cbxInverseImage: TCheckBox;
+    edtImageScale: TEdit;
+    lbImageScale: TLabel;
     procedure btnOpenFileClick(Sender: TObject);
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
@@ -188,8 +190,6 @@ begin
         dir[nl].exp_time := pHeader.exp_time
      else
         dir[nl].exp_time := pHeader.exp_bottom;
-
-
     end;
 
 
@@ -399,6 +399,7 @@ var
     dw: Integer;
     dh: Integer;
     rs: Single;
+    sc: Single;
      x: Integer;
      y: Integer;
      s: String;
@@ -422,10 +423,13 @@ begin
  cx := bmp.Width / rs * 25.4;
  cy := bmp.Height / rs * 25.4;
 
- lbInfo.Caption := Format('Image size: %.1f x %.1f mm. ', [cx, cy]);
+ lbInfo.Caption := Format('Source image size: %.1f x %.1f mm. ', [cx, cy]);
 
- cx := XRES / rs;
- cy := YRES / rs;
+ sc := atof(edtImageScale.Text);
+ if sc = 0 then sc := 1.0;
+
+ cx := sc * XRES / rs;
+ cy := sc * YRES / rs;
  lbInfo.Caption := lbInfo.Caption + Format('Resize ratio X = %.3f, Y = %.3f', [cx, cy]);
 
  dw := Round (bmp.Width * cx);

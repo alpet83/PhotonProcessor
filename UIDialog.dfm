@@ -43,6 +43,14 @@ object MainForm: TMainForm
     ExplicitLeft = 624
     ExplicitTop = 272
   end
+  object lbImageScale: TLabel
+    Left = 850
+    Top = 832
+    Width = 61
+    Height = 13
+    Anchors = [akRight, akBottom]
+    Caption = 'Image scale:'
+  end
   object btnOpenFile: TButton
     Left = 8
     Top = 914
@@ -176,13 +184,22 @@ object MainForm: TMainForm
     OnClick = btnLoadImageClick
   end
   object cbxInverseImage: TCheckBox
-    Left = 726
+    Left = 718
     Top = 831
     Width = 97
     Height = 17
     Anchors = [akRight, akBottom]
     Caption = 'Inverse Image'
     TabOrder = 11
+  end
+  object edtImageScale: TEdit
+    Left = 924
+    Top = 829
+    Width = 121
+    Height = 21
+    Anchors = [akRight, akBottom]
+    TabOrder = 12
+    Text = '0.995'
   end
   object uiOpenDialog: TOpenDialog
     Filter = 'Anycubc PHOTON files|*.photon|Bitmap files|*.bmp'
